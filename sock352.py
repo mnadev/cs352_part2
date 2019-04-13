@@ -13,17 +13,14 @@ from random import randint
 # encryption libraries 
 import nacl.utils
 import nacl.secret
-# import nacl.utils
 from nacl.public import PrivateKey, Box
 
 # if you want to debug and print the current stack frame 
 from inspect import currentframe, getframeinfo
 
-
 # these are globals to the sock352 class and
 # define the UDP ports all messages are sent
 # and received from
-
 # the ports to use for the sock352 messages 
 # sock352portTx is what we send on
 # sock352portRx is what we recieve on
@@ -37,6 +34,7 @@ global publicKeysHex
 global privateKeysHex
 
 # the public and private keychains in binary format 
+# They will be stored as dictionaries
 global publicKeys
 global privateKeys
 
@@ -52,16 +50,12 @@ global ENCRYPT
 
 # this is 0xEC 
 # Ideally, this should be what the encryption flag is when 
-# either calling accept() or connect()
+# either calling accept() or connect(). If it is not, 
+# we will not set encryption.
 ENCRYPT = 236 
-
 
 # this is the structure of the sock352 packet 
 sock352HdrStructStr = '!BBBBHHLLQQLL'
-
-#Global variables that store the sending and receiving ports of the socket
-portTx = 0
-portRx = 0
 
 #Global variables that store the packet header format and packet header length
 #to use within the struct in order to pack and unpack
@@ -76,20 +70,20 @@ NONCE_SIZE = 40
 MAXIMUM_PACKET_SIZE = 64000
 MAXIMUM_PAYLOAD_SIZE = MAXIMUM_PACKET_SIZE - PACKET_HEADER_LENGTH - NONCE_SIZE
 
-#Global variables that define all the packet bits
+# Global variables that define all the packet bits for the flags
 SOCK352_SYN = 0x01
 SOCK352_FIN = 0x02
 SOCK352_ACK = 0x04
 SOCK352_RESET = 0x08
 SOCK352_HAS_OPT = 0x10
 
-#Global variables that store the index for the flag, sequence no. and ack no. within the packet header
+# Global variables that store the index for the flag, option, sequence no. and ack no. within the packet header
 PACKET_FLAG_INDEX = 1
 PACKET_OPT_PTR_INDEX = 2
 PACKET_SEQUENCE_NO_INDEX = 8
 PACKET_ACK_NO_INDEX = 9
 
-#String message to print out that a connection has been already established
+# String message to print out that a connection has been already established
 CONNECTION_ALREADY_ESTABLISHED_MESSAGE = "This socket supports a maximum of one connection\n" \
                                  "And a connection is already established"
 
@@ -105,10 +99,13 @@ def init(UDPportTx, UDPportRx):
     if (UDPportRx is None or UDPportRx == 0):
         UDPportRx = 27182
 
+    global sock352portRx
+    global sock352portTx
     # Assigns the global transmit and receive ports to be the one passed in through this method
-    global portTx, portRx
-    portTx = int(UDPportTx)
-    portRx = int(UDPportRx)
+    sock352portTx = int(UDPportTx)
+    sock352portRx = int(UDPportRx)
+    # print "Port from %d"%sock352portTx
+    # print "Port to %d"%sock352portRx
 
     
 # read the keyfile. The result should be a private key and a keychain of
@@ -142,6 +139,8 @@ def readKeyChain(filename):
     else:
             print ("error: No filename presented")             
 
+    print publicKeys
+    print privateKeys
     return (publicKeys,privateKeys)
 
 class socket:
@@ -149,6 +148,9 @@ class socket:
     def __init__(self):
         # Create the UDP socket
         self.socket = syssock.socket(syssock.AF_INET, syssock.SOCK_DGRAM)
+        
+        # allow reusing addresses for testing on local devices
+        self.socket.setsockopt(syssock.SOL_SOCKET, syssock.SO_REUSEADDR, 1)
 
         # sets the timeout to be 0.2 seconds
         self.socket.settimeout(0.2)
@@ -163,19 +165,15 @@ class socket:
         # It's false by default unless encryption is specified
         self.is_encrypted = False
 
-
         # The opt_ptr we will send. It is 0x0 for now.
         self.encrypted_flag = 0x0
-
 
         # Set box for encryption. Currently it's -1 because we don't
         # know if encryption will be set.
         self.box = -1
 
-
         # controls whether or not this socket can close (it's only allowed to close once all data is received)
         self.can_close = False
-
 
         # selects a random sequence number between 1 and 100000 as the first sequence number
         self.sequence_no = randint(1, 100000)
@@ -200,17 +198,19 @@ class socket:
         self.last_data_packet_acked = None 
     
     def bind(self,address):
-        # bind is not used in this assignment 
-        self.socket.bind((address[0], portRx))
+        # bind is not used in this assignment
+        print "Binding to %s:%s"%(address[0], sock352portRx)
+        self.socket.bind((address[0], sock352portRx))
         return
 
     def connect(self,*args):
-
+        print "Connecting"
         # example code to parse an argument list (use option arguments if you want)
         # Get the global variables
         global sock352portTx
         global ENCRYPT
 
+        
         # If no arguments given, notify and return
         if (len(args) == 0):
             print "Not enough arguments given"
@@ -219,9 +219,11 @@ class socket:
         # Set the destination and the port on the destination to send to.
         if (len(args) >= 1): 
             (host,port) = args[0]
-
-            # Set the sending address
-            self.send_address = (host, port)
+            print "Setting host"
+            # if host == "localhost":
+            # host = "127.0.0.1"
+            # set the sending address
+            self.send_address = (host, sock352portTx)
 
         # Check if encryption flag is given and then set encryption to
         # True if the correct flag is given.
@@ -229,9 +231,8 @@ class socket:
             if (args[1] == ENCRYPT):
                 self.is_encrypted = True
                 
-
         # binds the client on the receiving port
-        self.socket.bind(('', portRx))
+        self.socket.bind(('', sock352portRx))
 
         # makes sure the client isn't already connected. If it is, prints an error message
         if self.is_connected:
@@ -245,17 +246,22 @@ class socket:
         if self.is_encrypted:
             self.encrypted_flag = 0x1
 
-        syn_packet = self.createPacket(flags=SOCK352_SYN, opt_ptr=self.encrypted_flag,sequence_no=self.sequence_no)
+
+        syn_packet = self.createPacket(flags=SOCK352_SYN, opt_ptr=self.encrypted_flag, sequence_no=self.sequence_no)
         
+        print "Sending first SYN to %s:%s"%(self.send_address[0],self.send_address[1])
         self.socket.sendto(syn_packet, self.send_address)
         # increments the sequence since it was consumed in creation of the SYN packet
         self.sequence_no += 1
 
+        print self.send_address
         # Receives the SYN_ACK from Step 2 within accept()
         
         received_handshake_packet = False
         while not received_handshake_packet:
             try:
+                print "Waiting for ACK from %s:%s"%(self.send_address[0],self.send_address[1])
+
                 # tries to receive a SYN/ACK packet from the server using recvfrom and unpacks it
                 (syn_ack_packet, addr) = self.socket.recvfrom(PACKET_HEADER_LENGTH)
                 syn_ack_packet = struct.unpack(PACKET_HEADER_FORMAT, syn_ack_packet)
@@ -269,14 +275,19 @@ class socket:
                 if syn_ack_packet[PACKET_FLAG_INDEX] == SOCK352_SYN | SOCK352_ACK and syn_ack_packet[PACKET_OPT_PTR_INDEX] == self.encrypted_flag:
                     received_handshake_packet = True
 
+                if self.is_encrypted and not syn_ack_packet[PACKET_OPT_PTR_INDEX] == self.encrypted_flag:
+                    raise Exception("Server connection error due to encryption options.") 
+
                 # if it receives a packet with an incorrect ACK from its sequence number,
                 # it tries to receive more packets
                 if syn_ack_packet[PACKET_ACK_NO_INDEX] != self.sequence_no:
                     received_handshake_packet = False
+
             # retransmits the SYN packet in case of timeout when receiving a SYN/ACK from the server
             except syssock.timeout:
                 self.socket.sendto(syn_packet, self.send_address)
 
+        print "Sending final ACK to %s:%s"%(self.send_address[0],self.send_address[1])
         # sets the client's acknowledgement number to be SYN/ACK packet's sequence number + 1
         self.ack_no = syn_ack_packet[PACKET_SEQUENCE_NO_INDEX] + 1
 
@@ -287,35 +298,38 @@ class socket:
         # increments the sequence number as it was consumed by the ACK packet
         self.sequence_no += 1
 
-        # sets the connected boolean to be true
         self.is_connected = True
 
-        # After connection established create the box.
-        if self.is_encrypted:
-            self.box = Box(privateKeys[(host,portTx)], publicKeys[(host, portTx)])
-
         # sends the ack packet to the server, as it assumes it's connected now
+
         self.socket.sendto(ack_packet, self.send_address)
         print ("Client is now connected to the server at %s:%s" % (self.send_address[0], self.send_address[1]))
 
+         # After connection established create the box.
+        if self.is_encrypted:
+            self.box = Box(privateKeys[('*','*')], publicKeys[(self.send_address[0], str(sock352portRx))])
+
     def listen(self,backlog):
         # listen is not used in this assignments 
+        print "Listening for connection"
         pass
     
 
     def accept(self,*args):
-        # example code to parse an argument list (use option arguments if you want)
+        # All that should be passed in this case is the Encrypt flag
+        
         global ENCRYPT
         if (len(args) >= 1):
             if (args[0] == ENCRYPT):
                 self.is_encrypted = True
         
-        encrypted_flag = 0x0
+
+        # Set the option to 0x1 if we are encrypted
         if self.is_encrypted:
-            encrypted_flag = 0x1
+            self.encrypted_flag = 0x1
 
         # your code goes here 
-         # makes sure again that the server is not already connected
+        # makes sure again that the server is not already connected
         # because part 1 supports a single connection only
         if self.is_connected:
             print (CONNECTION_ALREADY_ESTABLISHED_MESSAGE)
@@ -328,6 +342,16 @@ class socket:
                 # tries to receive a potential SYN packet and unpacks it
                 (syn_packet, addr) = self.socket.recvfrom(PACKET_HEADER_LENGTH)
                 syn_packet = struct.unpack(PACKET_HEADER_FORMAT, syn_packet)
+                print "Received connection request from %s:%s"%(addr[0],addr[1])
+
+                # Set address to send to
+                self.send_address = addr
+
+                # print "Port from %d"%addr[1]
+                # print "Port from %d"%sock352portRx
+
+                if not addr[1] == sock352portTx:
+                    raise Exception("Issue with sending port.")
 
                 # if the received packet is not a SYN packet, it ignores the packet
                 if syn_packet[PACKET_FLAG_INDEX] == SOCK352_SYN:
@@ -344,15 +368,18 @@ class socket:
         # Step 2: Send a SYN/ACK packet for the 3-way handshake
         # creates the flags bit to be the bit-wise OR of SYN/ACK
         flags = SOCK352_SYN | SOCK352_ACK
+        
         # creates the SYN/ACK packet to ACK the connection request from client
         # and sends the SYN to establish the connection from this end
-        syn_ack_packet = self.createPacket(flags=flags, opt_ptr=encrypted_flag,
+        syn_ack_packet = self.createPacket(flags=flags, opt_ptr=self.encrypted_flag,
                                            sequence_no=self.sequence_no,
                                            ack_no=syn_packet[PACKET_SEQUENCE_NO_INDEX] + 1)
 
         # increments the sequence number as it just consumed it when creating the SYN/ACK packet
         self.sequence_no += 1
+
         # sends the created packet to the address from which it received the SYN packet
+        print "Sending ACK to %s:%s"%(addr[0],addr[1])
         self.socket.sendto(syn_ack_packet, addr)
 
         # Receive the final ACK to complete the handshake and establish connection
@@ -362,12 +389,13 @@ class socket:
                 # keeps trying to receive the final ACK packet to finalize the connection
                 (ack_packet, addr) = self.socket.recvfrom(PACKET_HEADER_LENGTH)
                 ack_packet = struct.unpack(PACKET_HEADER_FORMAT, ack_packet)
+
+                print "Received connection request from %s:%s"%(addr[0],addr[1])
+
                 # if the unpacked packet has the ACK flag set, we are done
                 if ack_packet[PACKET_FLAG_INDEX] == SOCK352_ACK:
-                    if self.encrypt and not ack_packet[PACKET_OPT_PTR_INDEX] == 0x1:
-                        print("Client does not support encryption!")
-                        self.encrypt = False
-                        encrypted_flag = 0x0
+                    if self.is_encrypted and not ack_packet[PACKET_OPT_PTR_INDEX] == 0x1:
+                        raise Exception("Error while trying to set up encryption.")
 
                     got_final_ack = True
             # if the server times out when trying to receive the final ACK, it retransmits the SYN/ACK packet
@@ -378,16 +406,15 @@ class socket:
         self.ack_no = ack_packet[PACKET_SEQUENCE_NO_INDEX] + 1
 
         # updates the server's send address
-        self.send_address = (addr[0], portTx)
-
-        # connect to the client using the send address just set
-        #self.socket.connect(self.send_address)
+        self.send_address = (addr[0], sock352portTx)
 
         # updates the connected boolean to reflect that the server is now connected
         self.is_connected = True
 
+        print "Creating box."
+        # Create the box
         if self.is_encrypted:
-            self.box = Box(privateKeys[self.send_address], publicKeys[self.send_address])
+            self.box = Box(privateKeys[('*','*')], publicKeys[(self.send_address[0], str(sock352portRx))])
 
         print("Server is now connected to the client at %s:%s" % (self.send_address[0], self.send_address[1]))
 
@@ -441,10 +468,6 @@ class socket:
             if i == total_packets - 1:
                 if len(buffer) % MAXIMUM_PAYLOAD_SIZE != 0:
                     payload_len = len(buffer) % MAXIMUM_PAYLOAD_SIZE
-            encrypted_flag = 0x0
-            if self.encrypt:
-                encrypted_flag = 0x1
-
 
             # creates the new packet with the appropriate header
             new_packet = self.createPacket(flags=0x0,opt_ptr= self.encrypted_flag,
