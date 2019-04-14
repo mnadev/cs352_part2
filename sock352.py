@@ -11,16 +11,17 @@ import struct, sys, time, binascii, threading
 from random import randint, choice
 
 # encryption libraries 
+# I didn't have to use nacl.secret at all,
+# since we used public key encryption
 import nacl.utils
-import nacl.secret
+# import nacl.secret
 from nacl.public import PrivateKey, Box
 
 # if you want to debug and print the current stack frame 
 from inspect import currentframe, getframeinfo
 
 # these are globals to the sock352 class and
-# define the UDP ports all messages are sent
-# and received from
+# define the UDP ports all messages are sent and received from
 # the ports to use for the sock352 messages 
 # sock352portTx is what we send on
 # sock352portRx is what we recieve on
@@ -29,7 +30,9 @@ global sock352portRx
 
 # the public and private keychains in hex format 
 # The public key is shared between client and server
+
 # The private key is not shared.
+# We do not use the hex format, but are using the binary format.
 global publicKeysHex
 global privateKeysHex
 
@@ -57,21 +60,24 @@ ENCRYPT = 236
 # this is the structure of the sock352 packet 
 sock352HdrStructStr = '!BBBBHHLLQQLL'
 
-#Global variables that store the packet header format and packet header length
-#to use within the struct in order to pack and unpack
+# Global variables that store the packet header format and packet header length
+# to use within the struct in order to pack and unpack
 PACKET_HEADER_FORMAT = "!BBBBHHLLQQLL"
 PACKET_HEADER_LENGTH = struct.calcsize(PACKET_HEADER_FORMAT)
 
 #Global variables that are responsible for storing the maximum packet size and the
 #maximum payload size
 # The maximum packet size is 64000, but we want to send the header as well as the nonce
-# so we decrease the payload by that amount
+# so we decrease the payload by that amount. The NONCE_SIZE is 40 so I set it as a 
+# constant. We have to account for it in recv and making the packets.
 NONCE_SIZE = 40
 MAXIMUM_PACKET_SIZE = 64000
 MAXIMUM_PAYLOAD_SIZE = 60000
 N_PACKETS_LIMIT = 10
 
 # Global variables that define all the packet bits for the flags
+# I chose to not use HAS_OPT because the opt_ptr basically states the same thing
+# and we can check for encryption through that. 
 SOCK352_SYN = 0x01
 SOCK352_FIN = 0x02
 SOCK352_ACK = 0x04
@@ -88,6 +94,8 @@ PACKET_ACK_NO_INDEX = 9
 CONNECTION_ALREADY_ESTABLISHED_MESSAGE = "This socket supports a maximum of one connection\n" \
                                  "And a connection is already established"
 
+# This function was not modified. Just set the sending 
+# and receiving ports.
 def init(UDPportTx, UDPportRx):
     # create the sockets to send and receive UDP packets on 
     # if the ports are not equal, create two sockets, one for Tx and one for Rx
@@ -111,6 +119,7 @@ def init(UDPportTx, UDPportRx):
     
 # read the keyfile. The result should be a private key and a keychain of
 # public keys
+# This function was not modified
 def readKeyChain(filename):
     global publicKeysHex
     global privateKeysHex 
@@ -166,7 +175,7 @@ class socket:
         # It's false by default unless encryption is specified
         self.is_encrypted = False
 
-        # The opt_ptr we will send. It is 0x0 for now.
+        # The opt_ptr we will send. It is 0x0 for now. We change the value later if we encrypt the data.
         self.encrypted_flag = 0x0
 
         # Set box for encryption. Currently it's -1 because we don't
@@ -177,8 +186,7 @@ class socket:
         self.can_close = False
 
         # selects a random sequence number between 1 and 100000 as the first sequence number
-        self.sequence_no = 0
-        # randint(1, 100000)
+        self.sequence_no = randint(1, 100000)
 
         # sets the ack number of the socket to be 0, inititalized later when connection is established
         self.ack_no = 0
@@ -196,43 +204,42 @@ class socket:
         # the corresponding lock for the retransmit boolean
         self.retransmit_lock = threading.Lock()
 
-        self.sequence_no_list = []
-        self.index_mapping_sequence_no_list = []
-
-        self.received_seq_list = []
-
         # declares the last packet that was acked (for the sender only)
         self.last_data_packet_acked = None 
     
+    # In bind, we really just call bind and bind to the address
+    # passed and to the receiving port so we can recieve data.
     def bind(self,address):
-        # bind is not used in this assignment
         print "Binding to %s:%s"%(address[0], sock352portRx)
         self.socket.bind((address[0], sock352portRx))
         return
 
+    # The function that defines connection from a client persepective
     def connect(self,*args):
-        print "Connecting"
-        # example code to parse an argument list (use option arguments if you want)
+        print "Connecting to server..."
+      
         # Get the global variables
         global sock352portTx
         global ENCRYPT
 
-        
-        # If no arguments given, notify and return
+        # If no arguments given, raise exception so the client doesn't try to send data 
+        # through a non-existent connection later.
         if (len(args) == 0):
-            print "Not enough arguments given"
-            return
+            raise Exception("Not enough arguments given.")
 
         # Set the destination and the port on the destination to send to.
         if (len(args) >= 1): 
+            # We will ignore port since we already set the transmitting
+            # and receiving ports in init().
             (host,port) = args[0]
-            print "Setting host"
-            # if host == "localhost":
-            # host = "127.0.0.1"
-            # set the sending address
+            
+            # Set self.send_address to the IP that was passed and the port
+            # that we want to send to.
+
+            print "Setting address"
             self.send_address = (host, sock352portTx)
 
-        # Check if encryption flag is given and then set encryption to
+        # Check if encryption flag is given and then set is_encrypted to
         # True if the correct flag is given.
         if (len(args) >= 2):
             if (args[1] == ENCRYPT):
@@ -253,37 +260,38 @@ class socket:
         if self.is_encrypted:
             self.encrypted_flag = 0x1
 
-
+        # Since our option is set by the variable encrypted_flag, we just pass that
+        # value whenever we create a packet and let the rest take care of itself.
         syn_packet = self.createPacket(flags=SOCK352_SYN, opt_ptr=self.encrypted_flag, sequence_no=self.sequence_no)
         
-        print "Sending first SYN to %s:%s"%(self.send_address[0],self.send_address[1])
+        print "Sending first SYN to %s:%s" % (self.send_address[0],self.send_address[1])
+        
         self.socket.sendto(syn_packet, self.send_address)
+
         # increments the sequence since it was consumed in creation of the SYN packet
         self.sequence_no += 1
 
-        print self.send_address
         # Receives the SYN_ACK from Step 2 within accept()
-        
         received_handshake_packet = False
+
         while not received_handshake_packet:
             try:
-                print "Waiting for ACK from %s:%s"%(self.send_address[0],self.send_address[1])
+                print "Waiting for ACK from %s:%s" % (self.send_address[0],self.send_address[1])
 
                 # tries to receive a SYN/ACK packet from the server using recvfrom and unpacks it
                 (syn_ack_packet, addr) = self.socket.recvfrom(PACKET_HEADER_LENGTH)
                 syn_ack_packet = struct.unpack(PACKET_HEADER_FORMAT, syn_ack_packet)
+
                 # if it receives a reset marked flag for any reason, abort the handshake
+                # The connection might be reset if the Encryption flag wasn't set by either the client or 
+                # server but was set by the other. 
                 if syn_ack_packet[PACKET_FLAG_INDEX] == SOCK352_RESET:
-                    print "Connection was reset by the server"
-                    return
+                    raise Exception("Connection was reset by the server")
 
                 # if it receives a packet, and it is SYN/ACK, we are done
                 # We also will check if we recieve the opt_ptr we sent to the server
                 if syn_ack_packet[PACKET_FLAG_INDEX] == SOCK352_SYN | SOCK352_ACK and syn_ack_packet[PACKET_OPT_PTR_INDEX] == self.encrypted_flag:
                     received_handshake_packet = True
-
-                if self.is_encrypted and not syn_ack_packet[PACKET_OPT_PTR_INDEX] == self.encrypted_flag:
-                    raise Exception("Server connection error due to encryption options.") 
 
                 # if it receives a packet with an incorrect ACK from its sequence number,
                 # it tries to receive more packets
@@ -294,7 +302,8 @@ class socket:
             except syssock.timeout:
                 self.socket.sendto(syn_packet, self.send_address)
 
-        print "Sending final ACK to %s:%s"%(self.send_address[0],self.send_address[1])
+        print "Sending final ACK to %s:%s" % (self.send_address[0],self.send_address[1])
+
         # sets the client's acknowledgement number to be SYN/ACK packet's sequence number + 1
         self.ack_no = syn_ack_packet[PACKET_SEQUENCE_NO_INDEX] + 1
 
@@ -305,6 +314,7 @@ class socket:
         # increments the sequence number as it was consumed by the ACK packet
         self.sequence_no += 1
 
+        # Set connecte boolean to true
         self.is_connected = True
 
         # sends the ack packet to the server, as it assumes it's connected now
@@ -313,6 +323,8 @@ class socket:
         print ("Client is now connected to the server at %s:%s" % (self.send_address[0], self.send_address[1]))
 
          # After connection established create the box.
+         # For this, we default the private keys to be of the address ('*', '*') and the public keys
+         # to be (sending_ip_address, receiving_port)
         if self.is_encrypted:
             self.box = Box(privateKeys[('*','*')], publicKeys[(self.send_address[0], str(sock352portRx))])
 
@@ -330,7 +342,6 @@ class socket:
             if (args[0] == ENCRYPT):
                 self.is_encrypted = True
         
-
         # Set the option to 0x1 if we are encrypted
         if self.is_encrypted:
             self.encrypted_flag = 0x1
@@ -338,6 +349,7 @@ class socket:
         # your code goes here 
         # makes sure again that the server is not already connected
         # because part 1 supports a single connection only
+        # In part 2, we are still only supporting a single connection
         if self.is_connected:
             print (CONNECTION_ALREADY_ESTABLISHED_MESSAGE)
             return
@@ -362,11 +374,24 @@ class socket:
 
                 # if the received packet is not a SYN packet, it ignores the packet
                 if syn_packet[PACKET_FLAG_INDEX] == SOCK352_SYN:
-                    #if self.encrypt and not syn_packet[PACKET_OPT_PTR_INDEX] == 0x1:
-                    #    print("Client does not support encryption!")
-                    #    self.is_encrypted = False
-                    #    encrypted_flag = 0x0
-    
+
+                    # If there is a discrepancy between client and server on encryption,
+                    # we will reset connection. We only have to check on one side
+                    # so I am checking on the server
+                    if self.is_encrypted and not syn_packet[PACKET_OPT_PTR_INDEX] == 0x1:
+
+                            # Create a packet with the reset flag.
+                            reset_packet = self.createPacket(flags=SOCK352_RESET, opt_ptr=self.encrypted_flag,
+                                           sequence_no=self.sequence_no,
+                                           ack_no=syn_packet[PACKET_SEQUENCE_NO_INDEX] + 1)
+
+                            # Send the packet to reset the connection
+                            print "Sending RESET to %s:%s" % (addr[0],addr[1])
+
+                            self.socket.sendto(reset_packet, addr)
+
+                            raise Exception("Resetting connection")
+
                     got_connection_request = True
             # if the receive times out while receiving a SYN packet, it tries to listen again
             except syssock.timeout:
@@ -386,7 +411,8 @@ class socket:
         self.sequence_no += 1
 
         # sends the created packet to the address from which it received the SYN packet
-        print "Sending ACK to %s:%s"%(addr[0],addr[1])
+        print "Sending ACK to %s:%s" % (addr[0], addr[1])
+
         self.socket.sendto(syn_ack_packet, addr)
 
         # Receive the final ACK to complete the handshake and establish connection
@@ -397,13 +423,10 @@ class socket:
                 (ack_packet, addr) = self.socket.recvfrom(PACKET_HEADER_LENGTH)
                 ack_packet = struct.unpack(PACKET_HEADER_FORMAT, ack_packet)
 
-                print "Received connection request from %s:%s"%(addr[0],addr[1])
+                print "Received connection request from %s:%s" % (addr[0],addr[1])
 
                 # if the unpacked packet has the ACK flag set, we are done
                 if ack_packet[PACKET_FLAG_INDEX] == SOCK352_ACK:
-                    if self.is_encrypted and not ack_packet[PACKET_OPT_PTR_INDEX] == 0x1:
-                        raise Exception("Error while trying to set up encryption.")
-
                     got_final_ack = True
             # if the server times out when trying to receive the final ACK, it retransmits the SYN/ACK packet
             except syssock.timeout:
@@ -427,6 +450,7 @@ class socket:
 
         return self, addr
 
+    # This was not modified from the solutions given.
     def close(self):
          # makes sure there is a connection established in the first place before trying to close it
         if not self.is_connected:
@@ -437,6 +461,7 @@ class socket:
         if self.can_close:
             # calls the socket's close method to finally close the connection
             self.socket.close()
+
             # resets all the appropriate variables
             self.send_address = None
             self.is_connected = False
@@ -453,7 +478,8 @@ class socket:
             print "Failed to close the connection!\n" \
                   "Still waiting for data transmission/reception to finish"
 
-     # method responsible for breaking apart the buffer into chunks of maximum payload length
+
+    # method responsible for breaking apart the buffer into chunks of maximum payload length
     def create_data_packets(self, buffer):
 
         # calculates the total packets needed to transmit the entire buffer
@@ -465,7 +491,7 @@ class socket:
         if len(buffer) % MAXIMUM_PAYLOAD_SIZE != 0:
             total_packets += 1
         
-        print "Total Packets %d"%total_packets
+        # print "Total Packets %d"%total_packets
 
         # sets the payload length to be the maximum payload size
         payload_len = MAXIMUM_PAYLOAD_SIZE
@@ -487,16 +513,12 @@ class socket:
             self.sequence_no += 1
             self.ack_no += 1
 
-            self.sequence_no_list.append(self.sequence_no)
-            self.index_mapping_sequence_no_list.append(self.sequence_no)
-
             sending_data = buffer[MAXIMUM_PAYLOAD_SIZE * i:MAXIMUM_PAYLOAD_SIZE * i + payload_len]
 
+            # Basically, what I added was just encrypting the data. So here, I encrypt
+            # the data before creating the packet. The packet then holds encrypted data.
             if self.is_encrypted:
-                # print "Len before %d"%len(sending_data)
-                # nonce = nacl.utils.random(self.box.NONCE_SIZE)
                 sending_data = self.box.encrypt(sending_data)
-                # print "Len after %d"%len(sending_data)
 
             # attaches the payload length of buffer to the end of the header to finish constructing the packet
             self.data_packets.append(new_packet + sending_data)
@@ -535,12 +557,6 @@ class socket:
 
             # checks if the packet to start retransmitting from is the total amount of packets this
             # would mean the last data packet has been transmitted and so its safe to close the connection
-            #if len(self.sequence_no_list) == 0:
-            #    self.can_close = True
-            #    break
-
-            # checks if the packet to start retransmitting from is the total amount of packets this
-            # would mean the last data packet has been transmitted and so its safe to close the connection
             if resend_start_index == total_packets:
                 self.can_close = True
 
@@ -552,23 +568,10 @@ class socket:
             # continually tries to transmit packets while the connection cannot be closed from resend start index
             # to the rest of the packets (or at least until as much as it can)
             while not self.can_close and resend_start_index < total_packets and not self.retransmit:
-                # while not self.can_close and len(self.sequence_no_list) > 0:
-                #if len(self.sequence_no_list) == 0:
-                #    break
-
+               
                 # tries to send the packet and catches any connection refused exception which might mean
                 # the connection was unexpectedly closed/broken
                 try:
-                    '''
-                    self.retransmit_lock.acquire()
-                    index_packet_send = self.index_mapping_sequence_no_list.index(choice(self.sequence_no_list))
-                    self.retransmit_lock.release()
-
-                    # print "Sending packet with index %d"%index_packet_send
-                    # print len(self.sequence_no_list)
-                    self.socket.sendto(self.data_packets[index_packet_send], self.send_address)
-                    '''
-
                     self.socket.sendto(self.data_packets[resend_start_index], self.send_address)
                 # Catch error 111 (Connection refused) in the case where the last ack
                 # was received by this sender and thus the connection was closed
@@ -607,26 +610,6 @@ class socket:
                 if self.last_data_packet_acked is None or\
                         new_packet[PACKET_SEQUENCE_NO_INDEX] > self.last_data_packet_acked[PACKET_SEQUENCE_NO_INDEX]:
                     self.last_data_packet_acked = new_packet
-            
-                '''
-                ack_no = new_packet[PACKET_ACK_NO_INDEX]
-
-                self.retransmit_lock.acquire()
-                if (ack_no - 1) in self.sequence_no_list:
-                    index_removed = self.index_mapping_sequence_no_list.index(ack_no - 1)
-                    print "Removed %d"%(ack_no - 1)
-                    self.sequence_no_list.remove(ack_no - 1)
-                self.retransmit_lock.release()
-                '''
-
-                # print len(self.sequence_no_list)
-                
-                # if the last data packet acked is not set, the newly received packet is set to be the last data packet
-                # acked. Otherwise, checks if the new packet's sequence number is greater than the last data packet
-                # acked's sequence number, otherwise it assumes it could be a duplicate ACK
-                #if self.last_data_packet_acked is None or\
-                #        new_packet[PACKET_SEQUENCE_NO_INDEX] > self.last_data_packet_acked[PACKET_SEQUENCE_NO_INDEX]:
-                #    self.last_data_packet_acked = new_packet
 
             # in the case where the recv times out, it locks down retransmit and sets it to True
             # to indicate that no ACk was received within the timeout window of 0.2 seconds
@@ -659,9 +642,6 @@ class socket:
 
         data_received = ""
 
-        # List of packets recieved.
-        packets_list = []
-
         num_pack_recv = 0
 
         print ("Started receiving data packets...")
@@ -671,18 +651,13 @@ class socket:
             try:
                 # receives the packet of header + maximum data size bytes (although it will be limited
                 # by the sender on the other side)
-                packet_received = self.socket.recv(PACKET_HEADER_LENGTH + bytes_to_receive + NONCE_SIZE) 
+                amount_to_recv = PACKET_HEADER_LENGTH + bytes_to_receive
 
-                '''
-                # sends the packet to another method to manage it and gets back the data in return
-                opened_packet = self.manage_recvd_data_packet(packet_received)
+                if self.is_encrypted:
+                    amount_to_recv += NONCE_SIZE
 
-                if opened_packet is None:
-                    #print "ASD"
-                    continue
+                packet_received = self.socket.recv(amount_to_recv) 
 
-                packets_list.append(opened_packet)
-                '''
                 str_received = self.manage_recvd_data_packet(packet_received)
 
                 # adjusts the numbers accordingly based on return value of manage data packet
@@ -694,25 +669,14 @@ class socket:
                     # less bytes need to be transmitted now
                     bytes_to_receive -= len(str_received)
                 
-                    print "bytes_to_receive %d"%bytes_to_receive
+                    # print "bytes_to_receive %d"%bytes_to_receive
                 
                 num_pack_recv += 1
-                print "Num Pack Received %s"%num_pack_recv
+                # print "Num Pack Received %s"%num_pack_recv
             # catches timeout, in which case it just tries to another packet
             except syssock.timeout:
                 pass
-
-        '''
-        print len(packets_list)
-        packets_list = self.reorder(packets_list)
-        print len(packets_list)
-
-        for packet in packets_list:
-            decrypted_str = packet[1]
-            print decrypted_str
-            if not decrypted_str is None:
-                data_received += decrypted_str
-        '''
+            
         # since it's done with receiving all the bytes, it marks the socket as safe to close
         self.can_close = True
 
@@ -722,6 +686,7 @@ class socket:
 
     # creates a generic packet to be sent using parameters that are
     # relevant to Part 1. The default values are specified above in case one or more parameters are not used
+    # Added the opt_ptr as an argument in the function call since we are using that now in part 2.
     def createPacket(self, flags=0x0, opt_ptr=0x0,sequence_no=0x0, ack_no=0x0, payload_len=0x0):
        
         
@@ -742,27 +707,8 @@ class socket:
                 payload_len  # payload_len
             )
 
-
-    def reorder(self, packet_list):
-        len_list = len(packet_list)
-
-        if len_list == 1:
-            return packet_list
-
-        # Sort the list by the sequence_no
-        for i in range(0,len_list):
-            for j in range(0, len_list - 1):
-                if packet_list[j][0][PACKET_SEQUENCE_NO_INDEX] > packet_list[j + 1][0][PACKET_SEQUENCE_NO_INDEX]:
-                    temp = packet_list[j]
-                    packet_list[j] = packet_list[j + 1]
-                    packet_list[j + 1] = temp
-
-        return packet_list
-
-
     # Manages a packet received based on the flag
     def manage_recvd_data_packet(self, packet):
-          
      
         packet_header = packet[:PACKET_HEADER_LENGTH]
         packet_data = packet[PACKET_HEADER_LENGTH:]
@@ -775,37 +721,14 @@ class socket:
         #     Case 2, the sequence number is out-of-order so drop the packet
         if packet_header[PACKET_SEQUENCE_NO_INDEX] != self.ack_no:
             return
-     
-        '''
-        seq = packet_header[PACKET_SEQUENCE_NO_INDEX]
 
-        if seq in self.received_seq_list:
-            # print "Already received, but sending ack anyways"
-            ack_packet = self.createPacket(flags=SOCK352_ACK,
-                                       sequence_no=self.sequence_no,
-                                       ack_no=(seq + 1))
-            # the server sends the packet to ACK the data packet it received
-            self.socket.sendto(ack_packet, self.send_address)
-            return None
-        
-        self.received_seq_list.append(seq)
-        '''
-
-        # Check if the packet that was received has the expected sequence no
-        # for the next in-order sequence no (which is the ack number)
-        #     Case 1, the sequence number is in-order so send back the acknowledgement
-        #     Case 2, the sequence number is out-of-order so drop the packet
-        # if packet_header[PACKET_SEQUENCE_NO_INDEX] != self.ack_no:
-        #    return
-    
-        # print "Received packet %d"%packet_header[PACKET_SEQUENCE_NO_INDEX]
-
-        # Here we will decrypt the data.
+        # Here we will decrypt the data by using the box to decrypt the data.
         if self.is_encrypted and packet_header[PACKET_OPT_PTR_INDEX] == 0x1 and not self.box == -1:
-            # Decrypt using box and then convert to utf 8
-            # because 
+            
             packet_data = self.box.decrypt(packet_data)
-       
+        # else:
+        #    print "No encryption"
+
         print "Length of packet data %d"%len(packet_data)
 
         # increments the acknowledgement by 1 since it is supposed to be the next expected sequence number
@@ -815,6 +738,7 @@ class socket:
         ack_packet = self.createPacket(flags=SOCK352_ACK,
                                        sequence_no=self.sequence_no,
                                        ack_no=self.ack_no)
+
         # the sequence number is incremented since it was consumed upon packet creation
         self.sequence_no += 1
         # the server sends the packet to ACK the data packet it received
